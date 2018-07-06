@@ -9,7 +9,7 @@ import numpy as np
 import tensorflow as tf
 from utils import is_valid_icd10
 import pandas as pd
-#from sklearn.model_selection import train_test_split
+from sklearn.model_selection import train_test_split
 #from collections import Counter
 import os
 
@@ -157,6 +157,18 @@ def build_dataset(read_file='data/wuxi_zc_18_7_4.csv', max_window_size = 300):
 #========================
 
 class dnn(object):
+    def generate_batch_test(self,pos):
+        target = self.data['test'][pos:pos+self.batch_size]
+        x = self.data['x'][target]
+        y = self.data['y'][target]
+        mask = self.data['mask'][target]
+        word_cnt = self.data['wc'][target]
+        a = self.data['side1'][target]
+        g = self.data['side2'][target]
+        s = self.data['side_info'][target]
+        #word_cnt = np.count_nonzero(mask, axis=1)
+        return x, mask.reshape(self.batch_size, self.max_window_size, 1), word_cnt, y, a, g, s
+    
     def generate_batch(self, pos):
     # CBOW w/ bagSize = num of subjects
     # if pos+batch_size >= len(words):
@@ -174,7 +186,7 @@ class dnn(object):
         #return x, word_cnt, y
         
         
-    def __init__(self, data, n_classes, vocab_size, side_size, side_window_size, ratio = 0.9, max_window_size=300, epochs = 2000, emb_side_size = 30, embedding_size = 100, n_hidden_1 = 256, n_hidden_2 = 100, batch_size = 64, lr = 0.0001):
+    def __init__(self, data, n_classes, vocab_size, side_size, side_window_size, ratio = 0.9, max_window_size=300, epochs = 2000, emb_side_size = 5, embedding_size = 100, n_hidden_1 = 512, n_hidden_2 = 100, batch_size = 256, lr = 0.001):
         
         # Hyper-params
         self.data = data
@@ -233,7 +245,7 @@ class dnn(object):
             
             # Model
             input_embedding = tf.nn.embedding_lookup(self.embeddings, self.x)
-            side_embedding = tf.reduce_mean(tf.nn.embedding_lookup(self.side_embeddings, self.x_side),axis=1)
+            side_embedding = tf.reduce_sum(tf.nn.embedding_lookup(self.side_embeddings, self.x_side),axis=1)
             self.H0 = tf.div(tf.reduce_sum(tf.multiply(input_embedding,self.emb_mask), 1),self.word_num)
             # concat w/ side info
             self.H0 = tf.concat([self.H0, side_embedding, self.age, self.gender],axis=1)
@@ -259,7 +271,7 @@ class dnn(object):
             correct_predictions = tf.equal(self.predictions, tf.argmax(self.y, 1))
             self.num_correct = tf.reduce_sum(tf.cast(correct_predictions, 'float'), name='accuracy')
     
-            self.optimizer = tf.train.AdamOptimizer(self.learning_rate).minimize(losses)
+            self.optimizer = tf.train.AdamOptimizer(self.learning_rate).minimize(self.loss)
             # initialization
             self.init_op = tf.global_variables_initializer()
             # create a saver 
@@ -272,13 +284,13 @@ class dnn(object):
         print('Initialzed')
         total_batches = len(self.data['idxes']) // self.batch_size
         train_batches = int(total_batches*self.ratio)
-        test_batches = total_batches-train_batches
+        val_batches = total_batches-train_batches
         print('Total Batches: '+ str(total_batches) + ' Training Batches: ' + str(train_batches))
         for epoch in range(self.epochs):
             epoch_cost = 0.
             # Shuffle trainning data every epoch
             
-            #np.random.shuffle(self.data['idxes'])
+            np.random.shuffle(self.data['idxes'])
             num_corrects = 0
             # training
             for i in range(train_batches):
@@ -292,14 +304,30 @@ class dnn(object):
             
             # evaluation
             num_corrects = 0
-            for i in range(test_batches):
+            epoch_cost = 0.
+            for i in range(val_batches):
                 x,m,w,y,a,g,s = self.generate_batch((i+train_batches)*self.batch_size)
                 feed_dict = {self.x_side:s, self.x:x, self.y:y, self.emb_mask:m, self.word_num:w, self.age:a, self.gender:g, self.keep_prob:1.0}
                 #feed_dict = {self.x:x, self.y:y, self.word_num:w, self.keep_prob:keep_prob}
                 l, acc = session.run([self.loss, self.num_correct],feed_dict = feed_dict)
                 epoch_cost += l
                 num_corrects += acc
-            print('Validation epoch = {}, cost = {}, num_corrects = {}, accuray = {}'.format(epoch, epoch_cost, num_corrects, num_corrects/(test_batches*self.batch_size)))
+            print('Validation epoch = {}, cost = {}, num_corrects = {}, accuray = {}'.format(epoch, epoch_cost, num_corrects, num_corrects/(val_batches*self.batch_size)))
+            '''
+            #test
+            if (epoch%30 == 0):
+                test_batches = len(self.data['test'])//self.batch_size
+                num_corrects = 0
+                epoch_cost = 0.
+                for i in range(test_batches):
+                    x,m,w,y,a,g,s = self.generate_batch_test(i*self.batch_size)
+                    feed_dict = {self.x_side:s, self.x:x, self.y:y, self.emb_mask:m, self.word_num:w, self.age:a, self.gender:g, self.keep_prob:1.0}
+                    #feed_dict = {self.x:x, self.y:y, self.word_num:w, self.keep_prob:keep_prob}
+                    l, acc = session.run([self.loss, self.num_correct],feed_dict = feed_dict)
+                    epoch_cost += l
+                    num_corrects += acc
+                print('Test epoch = {}, cost = {}, num_corrects = {}, accuray = {}'.format(epoch, epoch_cost, num_corrects, num_corrects/(test_batches*self.batch_size)))
+'''
         self.save()
         
     def predict(self, x):
@@ -320,8 +348,10 @@ def train():
     #Train/Test Splitting
     idxes = np.array(range(len(words)))
     np.random.shuffle(idxes)
+    idx_train, idx_test = train_test_split(idxes, test_size = 0.01, random_state = 42)
     data = {}
-    data['idxes'] = idxes
+    data['idxes'] = idx_train
+    data['test'] = idx_test
     data['x'] = words
     data['y'] = labels
     data['side1'] = ages
